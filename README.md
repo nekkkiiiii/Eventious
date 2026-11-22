@@ -44,10 +44,10 @@ On first start, the server creates its tables automatically. You can also run `s
 - **Admin**: sees, edits, and deletes every event, and manages users from the **Users** tab (change roles, remove accounts).
 - **Client**: sees, edits, and deletes only the events they created.
 
+The first account registered becomes the admin; everyone after that signs up as a client. If a database has users but no admin, the oldest account is promoted automatically. Admins can promote other users from the Users tab.
+
 ### Event approval
 Events created by clients start as **Awaiting approval**. An admin opens the event and clicks **Approve** or **Decline**, with an optional note (a note is required when declining). The client sees the decision and note on the event and in the notification bell. If a client edits an event after it was reviewed, it goes back to awaiting approval. Events created by admins are approved automatically. Declined events are left out of reminders and the needs summary.
-
-The first account registered becomes the admin; everyone after that signs up as a client. If a database has users but no admin, the oldest account is promoted automatically. Admins can promote other users from the Users tab.
 
 ## Project structure
 ```
