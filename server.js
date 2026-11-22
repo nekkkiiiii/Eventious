@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const path = require("path");
 const express = require("express");
 const session = require("express-session");
-const MySQLStore = require("express-mysql-session")(session);
+const PgStore = require("connect-pg-simple")(session);
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
 const db = require("./db");
@@ -31,8 +31,8 @@ app.use(async (req, res, next) => {
     await db.init();
     next();
   } catch (err) {
-    console.error("✖ Could not connect to MySQL:", err.message);
-    const msg = "The server can't reach its database. Check the DB_* settings.";
+    console.error("✖ Could not connect to the database:", err.message);
+    const msg = "The server can't reach its database. Check the DATABASE_URL setting.";
     if (req.path.startsWith("/api/")) return res.status(503).json({ error: msg });
     res.status(503).type("text").send(msg);
   }
@@ -41,10 +41,12 @@ app.use(async (req, res, next) => {
 app.use(session({
   name: "eventious.sid",
   secret: SESSION_SECRET,
-  store: new MySQLStore({
-    createDatabaseTable: true,
-    clearExpired: !ON_VERCEL, // no background timers in serverless; expired sessions are still rejected
-  }, db.getPool()),
+  store: new PgStore({
+    pool: db.getPool(),
+    tableName: "session",
+    createTableIfMissing: false, // created by schema.sql
+    pruneSessionInterval: ON_VERCEL ? false : 15 * 60, // no background timers in serverless
+  }),
   resave: false,
   saveUninitialized: false,
   proxy: true,
@@ -63,11 +65,20 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
+const query = (sql, params) => db.getPool().query(sql, params);
+
+/** Parses a numeric route id; anything invalid is treated as "not found". */
+function toId(value, what = "Item") {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id < 1 || id > 2147483647) throw new HttpError(404, `${what} not found.`);
+  return id;
+}
+
 /** Loads the logged-in user (fresh from the DB, so role changes apply immediately) into req.user. */
 async function requireAuth(req, res, next) {
   if (!req.session.userId) return res.status(401).json({ error: "Please log in." });
-  const [[user]] = await db.getPool().query(
-    "SELECT id, name, email, role FROM users WHERE id = ?", [req.session.userId]
+  const { rows: [user] } = await query(
+    "SELECT id, name, email, role FROM users WHERE id = $1", [req.session.userId]
   );
   if (!user) {
     req.session.destroy(() => {});
@@ -84,9 +95,14 @@ function requireAdmin(req, res, next) {
 
 const isAdmin = (user) => user.role === "admin";
 
-/** SQL condition limiting events to the ones this user may access (alias e). */
-function eventScope(user) {
-  return isAdmin(user) ? { sql: "1 = 1", params: [] } : { sql: "e.user_id = ?", params: [user.id] };
+/**
+ * SQL condition limiting events (alias e) to the ones this user may access.
+ * Appends its parameter to `params` so placeholder numbers stay correct.
+ */
+function eventScope(user, params) {
+  if (isAdmin(user)) return "TRUE";
+  params.push(user.id);
+  return `e.user_id = $${params.length}`;
 }
 
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role });
@@ -110,7 +126,7 @@ function parseEvent(body) {
     .map((n) => ({
       name: str(n?.name, 100),
       qty: Math.min(100000, Math.max(1, parseInt(n?.qty, 10) || 1)),
-      ready: n?.ready ? 1 : 0,
+      ready: !!n?.ready,
     }))
     .filter((n) => n.name);
 
@@ -141,42 +157,45 @@ function toClient(row, needs) {
 
 /** Admins see every event; clients see only their own. */
 async function loadEvents(user, eventId = null) {
-  const pool = db.getPool();
-  const scope = eventScope(user);
-  const base = `SELECT e.*, u.name AS creator_name FROM events e LEFT JOIN users u ON u.id = e.user_id WHERE ${scope.sql}`;
-  const [rows] = eventId
-    ? await pool.query(`${base} AND e.id = ?`, [...scope.params, eventId])
-    : await pool.query(`${base} ORDER BY e.event_date, e.event_time`, scope.params);
+  const params = [];
+  let sql = `SELECT e.*, u.name AS creator_name FROM events e LEFT JOIN users u ON u.id = e.user_id
+             WHERE ${eventScope(user, params)}`;
+  if (eventId) {
+    params.push(eventId);
+    sql += ` AND e.id = $${params.length}`;
+  }
+  const { rows } = await query(`${sql} ORDER BY e.event_date, e.event_time NULLS FIRST`, params);
   if (!rows.length) return [];
-  const [needs] = await pool.query(
-    "SELECT * FROM event_needs WHERE event_id IN (?) ORDER BY position, id",
+  const { rows: needs } = await query(
+    "SELECT * FROM event_needs WHERE event_id = ANY($1::int[]) ORDER BY position, id",
     [rows.map((r) => r.id)]
   );
   return rows.map((r) => toClient(r, needs.filter((n) => n.event_id === r.id)));
 }
 
-async function saveNeeds(conn, eventId, needs) {
-  await conn.query("DELETE FROM event_needs WHERE event_id = ?", [eventId]);
+async function saveNeeds(client, eventId, needs) {
+  await client.query("DELETE FROM event_needs WHERE event_id = $1", [eventId]);
   if (needs.length) {
-    await conn.query(
-      "INSERT INTO event_needs (event_id, name, qty, ready, position) VALUES ?",
-      [needs.map((n, i) => [eventId, n.name, n.qty, n.ready, i])]
+    await client.query(
+      `INSERT INTO event_needs (event_id, name, qty, ready, position)
+       SELECT $1, * FROM unnest($2::text[], $3::int[], $4::bool[], $5::int[])`,
+      [eventId, needs.map((n) => n.name), needs.map((n) => n.qty), needs.map((n) => n.ready), needs.map((_, i) => i)]
     );
   }
 }
 
 async function inTransaction(fn) {
-  const conn = await db.getPool().getConnection();
+  const client = await db.getPool().connect();
   try {
-    await conn.beginTransaction();
-    const result = await fn(conn);
-    await conn.commit();
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
     return result;
   } catch (err) {
-    await conn.rollback();
+    await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
-    conn.release();
+    client.release();
   }
 }
 
@@ -214,16 +233,16 @@ app.post("/api/register", authLimiter, async (req, res) => {
   const hash = await bcrypt.hash(password, 12);
   try {
     // The very first account becomes the admin; everyone else signs up as a client.
-    const [[{ n }]] = await db.getPool().query("SELECT COUNT(*) AS n FROM users");
-    const role = n ? "client" : "admin";
-    const [result] = await db.getPool().query(
-      "INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)", [name, email, hash, role]
+    const { rows: [user] } = await query(
+      `INSERT INTO users (name, email, password_hash, role)
+       VALUES ($1, $2, $3, CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'client' ELSE 'admin' END)
+       RETURNING id, name, email, role`,
+      [name, email, hash]
     );
-    const user = { id: result.insertId, name, email, role };
     await startSession(req, user);
     res.status(201).json({ user: publicUser(user) });
   } catch (err) {
-    if (err.code === "ER_DUP_ENTRY") throw new HttpError(409, "An account with that email already exists.");
+    if (err.code === "23505") throw new HttpError(409, "An account with that email already exists.");
     throw err;
   }
 });
@@ -231,7 +250,7 @@ app.post("/api/register", authLimiter, async (req, res) => {
 app.post("/api/login", authLimiter, async (req, res) => {
   const email = str(req.body.email, 190).toLowerCase();
   const password = typeof req.body.password === "string" ? req.body.password : "";
-  const [[user]] = await db.getPool().query("SELECT * FROM users WHERE email = ?", [email]);
+  const { rows: [user] } = await query("SELECT * FROM users WHERE email = $1", [email]);
 
   const ok = user && (await bcrypt.compare(password, user.password_hash));
   if (!ok) throw new HttpError(401, "Incorrect email or password.");
@@ -253,29 +272,29 @@ app.get("/api/me", requireAuth, (req, res) => {
 
 /* ---------- Admin: user management ---------- */
 app.get("/api/users", requireAuth, requireAdmin, async (req, res) => {
-  const [users] = await db.getPool().query(
+  const { rows: users } = await query(
     `SELECT u.id, u.name, u.email, u.role, u.created_at, COUNT(e.id) AS event_count
      FROM users u LEFT JOIN events e ON e.user_id = u.id
-     GROUP BY u.id, u.name, u.email, u.role, u.created_at ORDER BY u.role, u.name`
+     GROUP BY u.id ORDER BY u.role, u.name`
   );
   res.json({ users: users.map((u) => ({ ...publicUser(u), createdAt: u.created_at, eventCount: Number(u.event_count) })) });
 });
 
 app.patch("/api/users/:id", requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = toId(req.params.id, "User");
   const role = req.body.role;
   if (!["admin", "client"].includes(role)) throw new HttpError(400, "Role must be admin or client.");
   if (id === req.user.id && role !== "admin") throw new HttpError(400, "You can't remove your own admin role.");
-  const [result] = await db.getPool().query("UPDATE users SET role = ? WHERE id = ?", [role, id]);
-  if (!result.affectedRows) throw new HttpError(404, "User not found.");
+  const { rowCount } = await query("UPDATE users SET role = $1 WHERE id = $2", [role, id]);
+  if (!rowCount) throw new HttpError(404, "User not found.");
   res.json({ ok: true });
 });
 
 app.delete("/api/users/:id", requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = toId(req.params.id, "User");
   if (id === req.user.id) throw new HttpError(400, "You can't delete your own account.");
-  const [result] = await db.getPool().query("DELETE FROM users WHERE id = ?", [id]);
-  if (!result.affectedRows) throw new HttpError(404, "User not found.");
+  const { rowCount } = await query("DELETE FROM users WHERE id = $1", [id]);
+  if (!rowCount) throw new HttpError(404, "User not found.");
   res.json({ ok: true });
 });
 
@@ -286,14 +305,14 @@ app.get("/api/events", requireAuth, async (req, res) => {
 
 app.post("/api/events", requireAuth, async (req, res) => {
   const ev = parseEvent(req.body);
-  const id = await inTransaction(async (conn) => {
-    const [result] = await conn.query(
+  const id = await inTransaction(async (client) => {
+    const { rows: [row] } = await client.query(
       `INSERT INTO events (user_id, name, event_date, event_time, venue, client, category, remind_days, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
       [req.user.id, ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes]
     );
-    await saveNeeds(conn, result.insertId, ev.needs);
-    return result.insertId;
+    await saveNeeds(client, row.id, ev.needs);
+    return row.id;
   });
   const [saved] = await loadEvents(req.user, id);
   res.status(201).json({ event: saved });
@@ -301,42 +320,43 @@ app.post("/api/events", requireAuth, async (req, res) => {
 
 app.put("/api/events/:id", requireAuth, async (req, res) => {
   const ev = parseEvent(req.body);
-  const id = Number(req.params.id);
-  const scope = eventScope(req.user);
-  await inTransaction(async (conn) => {
-    const [[found]] = await conn.query(
-      `SELECT e.id FROM events e WHERE e.id = ? AND ${scope.sql} FOR UPDATE`, [id, ...scope.params]
+  const id = toId(req.params.id, "Event");
+  await inTransaction(async (client) => {
+    const params = [id];
+    const { rows: [found] } = await client.query(
+      `SELECT e.id FROM events e WHERE e.id = $1 AND ${eventScope(req.user, params)} FOR UPDATE`, params
     );
     if (!found) throw new HttpError(404, "Event not found.");
-    await conn.query(
-      `UPDATE events SET name = ?, event_date = ?, event_time = ?, venue = ?, client = ?, category = ?,
-              remind_days = ?, notes = ? WHERE id = ?`,
+    await client.query(
+      `UPDATE events SET name = $1, event_date = $2, event_time = $3, venue = $4, client = $5, category = $6,
+              remind_days = $7, notes = $8, updated_at = now() WHERE id = $9`,
       [ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes, id]
     );
-    await saveNeeds(conn, id, ev.needs);
+    await saveNeeds(client, id, ev.needs);
   });
   const [saved] = await loadEvents(req.user, id);
   res.json({ event: saved });
 });
 
 app.patch("/api/events/:id/needs/:needId", requireAuth, async (req, res) => {
-  const scope = eventScope(req.user);
-  const [result] = await db.getPool().query(
-    `UPDATE event_needs n JOIN events e ON e.id = n.event_id
-     SET n.ready = ? WHERE n.id = ? AND e.id = ? AND ${scope.sql}`,
-    [req.body.ready ? 1 : 0, Number(req.params.needId), Number(req.params.id), ...scope.params]
+  const eventId = toId(req.params.id);
+  const params = [!!req.body.ready, toId(req.params.needId), eventId];
+  const { rowCount } = await query(
+    `UPDATE event_needs n SET ready = $1 FROM events e
+     WHERE e.id = n.event_id AND n.id = $2 AND e.id = $3 AND ${eventScope(req.user, params)}`,
+    params
   );
-  if (!result.affectedRows) throw new HttpError(404, "Item not found.");
-  const [saved] = await loadEvents(req.user, Number(req.params.id));
+  if (!rowCount) throw new HttpError(404, "Item not found.");
+  const [saved] = await loadEvents(req.user, eventId);
   res.json({ event: saved });
 });
 
 app.delete("/api/events/:id", requireAuth, async (req, res) => {
-  const scope = eventScope(req.user);
-  const [result] = await db.getPool().query(
-    `DELETE e FROM events e WHERE e.id = ? AND ${scope.sql}`, [Number(req.params.id), ...scope.params]
+  const params = [toId(req.params.id, "Event")];
+  const { rowCount } = await query(
+    `DELETE FROM events e WHERE e.id = $1 AND ${eventScope(req.user, params)}`, params
   );
-  if (!result.affectedRows) throw new HttpError(404, "Event not found.");
+  if (!rowCount) throw new HttpError(404, "Event not found.");
   res.json({ ok: true });
 });
 
@@ -368,8 +388,8 @@ if (require.main === module) {
   db.init()
     .then(() => app.listen(PORT, () => console.log(`✔ Eventious running at http://localhost:${PORT}`)))
     .catch((err) => {
-      console.error("✖ Could not connect to MySQL:", err.message);
-      console.error("  Is MySQL running (XAMPP Control Panel → Start MySQL)? Check DB_* settings in .env.");
+      console.error("✖ Could not connect to the database:", err.message);
+      console.error("  Set DATABASE_URL in .env to your PostgreSQL connection string.");
       process.exit(1);
     });
 }
