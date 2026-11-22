@@ -6,11 +6,21 @@ const { Pool, types } = require("pg");
 types.setTypeParser(1082, (v) => v);
 
 /**
- * Connection: set DATABASE_URL (or POSTGRES_URL, which Vercel/Neon add automatically)
- * to your provider's connection string, e.g.
+ * Connection: set DATABASE_URL to your provider's connection string, e.g.
  *   postgresql://user:password@host/dbname?sslmode=require
+ * The Vercel + Neon integration may add it under a prefixed name instead
+ * (e.g. DATABASE_DATABASE_URL or DATABASE_POSTGRES_URL), so those work too.
  */
-const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+function findConnectionString() {
+  const env = process.env;
+  const preferred = ["DATABASE_URL", "POSTGRES_URL", "DATABASE_DATABASE_URL", "DATABASE_POSTGRES_URL"];
+  for (const key of preferred) if (env[key]) return env[key];
+  // Any other prefix the integration might use: *_DATABASE_URL or *_POSTGRES_URL (pooled)
+  const key = Object.keys(env).find((k) => /(^|_)(DATABASE|POSTGRES)_URL$/.test(k) && env[k]);
+  return key ? env[key] : undefined;
+}
+
+const connectionString = findConnectionString();
 
 const pool = new Pool({
   connectionString,
