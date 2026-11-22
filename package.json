@@ -1,7 +1,7 @@
 {
   "name": "eventious",
   "version": "1.0.0",
-  "description": "Event management system with MySQL backend and login",
+  "description": "Event management system with PostgreSQL backend and login",
   "main": "server.js",
   "private": true,
   "scripts": {

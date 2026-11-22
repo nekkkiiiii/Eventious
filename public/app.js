@@ -1,4 +1,4 @@
-/* Eventious: event management frontend (data stored in MySQL via the API) */
+/* Eventious: event management frontend (data stored in PostgreSQL via the API) */
 
 const SEEN_KEY = "eventious.seenNotifs";
 const PUSHED_KEY = "eventious.pushedNotifs";
