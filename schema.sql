@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS events (
   category    VARCHAR(50)  NOT NULL DEFAULT 'Other',
   remind_days SMALLINT     NOT NULL DEFAULT 3,
   notes       TEXT         NULL,
+  status      VARCHAR(10)  NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'declined')),
+  review_note TEXT         NULL,
+  reviewed_by INTEGER      NULL REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMPTZ  NULL,
   created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
@@ -47,6 +51,13 @@ CREATE INDEX IF NOT EXISTS idx_session_expire ON session (expire);
 
 -- Upgrade older databases and make sure there is always an admin
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(10) NOT NULL DEFAULT 'client';
+-- Events that existed before approvals were added count as already approved.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS status VARCHAR(10) NOT NULL DEFAULT 'approved';
+ALTER TABLE events ALTER COLUMN status SET DEFAULT 'pending';
+ALTER TABLE events ADD COLUMN IF NOT EXISTS review_note TEXT NULL;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS reviewed_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ NULL;
+CREATE INDEX IF NOT EXISTS idx_events_status ON events (status);
 UPDATE users SET role = 'admin'
 WHERE id = (SELECT MIN(id) FROM users)
   AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'admin');

@@ -151,6 +151,10 @@ function toClient(row, needs) {
     remindDays: row.remind_days,
     notes: row.notes || "",
     createdBy: row.creator_name || "",
+    status: row.status,
+    reviewNote: row.review_note || "",
+    reviewedBy: row.reviewer_name || "",
+    reviewedAt: row.reviewed_at,
     needs: needs.map((n) => ({ id: String(n.id), name: n.name, qty: n.qty, ready: !!n.ready })),
   };
 }
@@ -158,7 +162,10 @@ function toClient(row, needs) {
 /** Admins see every event; clients see only their own. */
 async function loadEvents(user, eventId = null) {
   const params = [];
-  let sql = `SELECT e.*, u.name AS creator_name FROM events e LEFT JOIN users u ON u.id = e.user_id
+  let sql = `SELECT e.*, u.name AS creator_name, r.name AS reviewer_name
+             FROM events e
+             LEFT JOIN users u ON u.id = e.user_id
+             LEFT JOIN users r ON r.id = e.reviewed_by
              WHERE ${eventScope(user, params)}`;
   if (eventId) {
     params.push(eventId);
@@ -306,10 +313,15 @@ app.get("/api/events", requireAuth, async (req, res) => {
 app.post("/api/events", requireAuth, async (req, res) => {
   const ev = parseEvent(req.body);
   const id = await inTransaction(async (client) => {
+    // Admins' own events need no review; clients' events wait for an admin to approve them.
+    const admin = isAdmin(req.user);
     const { rows: [row] } = await client.query(
-      `INSERT INTO events (user_id, name, event_date, event_time, venue, client, category, remind_days, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-      [req.user.id, ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes]
+      `INSERT INTO events (user_id, name, event_date, event_time, venue, client, category, remind_days, notes,
+                           status, reviewed_by, reviewed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CASE WHEN $11::int IS NULL THEN NULL ELSE now() END)
+       RETURNING id`,
+      [req.user.id, ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes,
+       admin ? "approved" : "pending", admin ? req.user.id : null]
     );
     await saveNeeds(client, row.id, ev.needs);
     return row.id;
@@ -327,13 +339,32 @@ app.put("/api/events/:id", requireAuth, async (req, res) => {
       `SELECT e.id FROM events e WHERE e.id = $1 AND ${eventScope(req.user, params)} FOR UPDATE`, params
     );
     if (!found) throw new HttpError(404, "Event not found.");
+    // When a client changes an event, it goes back to the admin for review.
+    const resetReview = isAdmin(req.user) ? ""
+      : ", status = 'pending', review_note = NULL, reviewed_by = NULL, reviewed_at = NULL";
     await client.query(
       `UPDATE events SET name = $1, event_date = $2, event_time = $3, venue = $4, client = $5, category = $6,
-              remind_days = $7, notes = $8, updated_at = now() WHERE id = $9`,
+              remind_days = $7, notes = $8, updated_at = now()${resetReview} WHERE id = $9`,
       [ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes, id]
     );
     await saveNeeds(client, id, ev.needs);
   });
+  const [saved] = await loadEvents(req.user, id);
+  res.json({ event: saved });
+});
+
+/** Admin approves or declines an event, optionally with a note (a reason is required to decline). */
+app.post("/api/events/:id/review", requireAuth, requireAdmin, async (req, res) => {
+  const id = toId(req.params.id, "Event");
+  const decision = req.body.decision;
+  const note = str(req.body.note, 1000) || null;
+  if (!["approved", "declined"].includes(decision)) throw new HttpError(400, "Decision must be approved or declined.");
+  if (decision === "declined" && !note) throw new HttpError(400, "Please add a note explaining why the event is declined.");
+  const { rowCount } = await query(
+    `UPDATE events SET status = $1, review_note = $2, reviewed_by = $3, reviewed_at = now() WHERE id = $4`,
+    [decision, note, req.user.id, id]
+  );
+  if (!rowCount) throw new HttpError(404, "Event not found.");
   const [saved] = await loadEvents(req.user, id);
   res.json({ event: saved });
 });

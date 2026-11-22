@@ -65,6 +65,8 @@
         <input type="search" id="searchInput" placeholder="Search events, venues, clients…" />
         <select id="filterSelect">
           <option value="upcoming">Upcoming</option>
+          <option value="pending">Awaiting approval</option>
+          <option value="declined">Declined</option>
           <option value="past">Past</option>
           <option value="all">All events</option>
         </select>
@@ -173,6 +175,10 @@
           <p class="muted small" id="needsEmpty">No needs yet. Use the buttons above to add some.</p>
         </div>
 
+        <p class="muted small hidden" id="reviewResetHint" style="margin-top:12px">
+          Saving changes sends this event back to the admin for approval.
+        </p>
+
         <div class="modal-foot">
           <button type="button" class="btn danger hidden" id="deleteBtn">Delete</button>
           <span class="spacer"></span>
@@ -191,6 +197,14 @@
         <button class="icon-btn" data-close aria-label="Close">✕</button>
       </div>
       <div id="detailBody"></div>
+      <div class="review-panel hidden" id="reviewPanel">
+        <h3>Review this event</h3>
+        <textarea id="reviewNote" rows="2" maxlength="1000" placeholder="Note to the client (required when declining)"></textarea>
+        <div class="review-actions">
+          <button class="btn danger" id="declineBtn">Decline</button>
+          <button class="btn approve" id="approveBtn">Approve</button>
+        </div>
+      </div>
       <div class="modal-foot">
         <span class="spacer"></span>
         <button class="btn" data-close>Close</button>

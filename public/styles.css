@@ -141,6 +141,23 @@ h3 { font-size: 1rem; }
 .pill.later { background: var(--primary-soft); color: var(--primary); }
 .pill.past { background: #f3f4f6; color: var(--muted); }
 .pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.pending { background: var(--warn-soft); color: var(--warn); }
+.pill.approved { background: var(--ok-soft); color: var(--ok); }
+.pill.declined { background: var(--danger-soft); color: var(--danger); }
+.pill-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.review-box { padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; border: 1px solid var(--border); }
+.review-box.pending { background: var(--warn-soft); border-color: #fde68a; }
+.review-box.approved { background: var(--ok-soft); border-color: #a7f3d0; }
+.review-box.declined { background: var(--danger-soft); border-color: #fecaca; }
+.review-box .review-note { white-space: pre-wrap; margin-top: 4px; }
+.review-panel { margin-top: 16px; padding: 14px; background: var(--bg); border-radius: 10px; display: flex; flex-direction: column; gap: 10px; }
+.review-panel textarea { width: 100%; resize: vertical; }
+.review-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.btn.approve { background: var(--ok); border-color: var(--ok); color: #fff; }
+.btn.approve:hover { filter: brightness(1.08); }
+.cal-event.pending { background: var(--warn); }
+.cal-event.declined { background: #9ca3af; text-decoration: line-through; }
+.dot.ok { background: var(--ok); }
 .pill.admin { background: var(--danger-soft); color: var(--danger); }
 .pill.client { background: var(--primary-soft); color: var(--primary); }
 .table-wrap { overflow-x: auto; }

@@ -95,7 +95,13 @@ function needsProgress(ev) {
   return { total, ready, pct: total ? Math.round((ready / total) * 100) : 100 };
 }
 const sortByDate = (a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || ""));
-const upcoming = () => events.filter((e) => daysUntil(e.date) >= 0).sort(sortByDate);
+// Declined events are left out of upcoming lists, reminders and needs totals.
+const upcoming = () => events.filter((e) => daysUntil(e.date) >= 0 && e.status !== "declined").sort(sortByDate);
+
+const STATUS_LABEL = { pending: "Awaiting approval", approved: "Approved", declined: "Declined" };
+function reviewPill(ev) {
+  return `<span class="pill ${ev.status}">${STATUS_LABEL[ev.status] || ev.status}</span>`;
+}
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -122,8 +128,33 @@ function getReminders() {
     });
 }
 
+/** Admins: events waiting for review. Clients: decisions on their events. */
+function getReviewNotices() {
+  if (isAdmin()) {
+    return events.filter((e) => e.status === "pending").sort(sortByDate).map((ev) => ({
+      key: `review|${ev.id}|pending`,
+      id: ev.id,
+      level: "info",
+      title: `Review needed: ${ev.name}`,
+      sub: `From ${ev.createdBy || "a client"} · ${formatDate(ev.date)}`,
+    }));
+  }
+  return events.filter((e) => e.status !== "pending" && e.reviewedBy && e.reviewedBy !== currentUser.name)
+    .map((ev) => ({
+      key: `review|${ev.id}|${ev.status}|${ev.reviewedAt}`,
+      id: ev.id,
+      level: ev.status === "approved" ? "ok" : "urgent",
+      title: `${ev.name} was ${ev.status}`,
+      sub: ev.reviewNote ? `Note: ${ev.reviewNote}` : `By ${ev.reviewedBy}`,
+    }));
+}
+
+function getAllNotices() {
+  return [...getReviewNotices(), ...getReminders()];
+}
+
 function renderNotifications() {
-  const reminders = getReminders();
+  const reminders = getAllNotices();
   const seen = new Set(load(SEEN_KEY, []));
   const unseen = reminders.filter((r) => !seen.has(r.key)).length;
 
@@ -146,7 +177,7 @@ function renderNotifications() {
 }
 
 function markNotificationsSeen() {
-  save(SEEN_KEY, getReminders().map((r) => r.key));
+  save(SEEN_KEY, getAllNotices().map((r) => r.key));
   renderNotifications();
 }
 
@@ -187,15 +218,12 @@ function renderDashboard() {
   const up = upcoming();
   const thisWeek = up.filter((e) => daysUntil(e.date) <= 7).length;
   const pendingNeeds = up.reduce((sum, e) => sum + e.needs.filter((n) => !n.ready).length, 0);
-  const thisMonth = up.filter((e) => {
-    const d = parseYMD(e.date), t = today();
-    return d.getMonth() === t.getMonth() && d.getFullYear() === t.getFullYear();
-  }).length;
+  const awaiting = events.filter((e) => e.status === "pending").length;
 
   $("#stats").innerHTML = [
     ["Upcoming events", up.length],
     ["This week", thisWeek],
-    ["This month", thisMonth],
+    ["Awaiting approval", awaiting],
     ["Needs not ready", pendingNeeds],
   ].map(([label, num]) => `<div class="stat"><div class="num">${num}</div><div class="label">${label}</div></div>`).join("");
 
@@ -209,6 +237,7 @@ function renderDashboard() {
             <div class="name">${esc(ev.name)}</div>
             <div class="muted small">${ev.time ? formatTime(ev.time) + " · " : ""}${esc(ev.venue || "No venue set")} · ${p.ready}/${p.total} needs ready</div>
           </div>
+          ${ev.status === "pending" ? reviewPill(ev) : ""}
           ${statusPill(ev)}
         </div>`;
       }).join("")
@@ -220,6 +249,7 @@ function renderEvents() {
   const filter = $("#filterSelect").value;
   let list = [...events];
   if (filter === "upcoming") list = list.filter((e) => daysUntil(e.date) >= 0).sort(sortByDate);
+  else if (filter === "pending" || filter === "declined") list = list.filter((e) => e.status === filter).sort(sortByDate);
   else if (filter === "past") list = list.filter((e) => daysUntil(e.date) < 0).sort((a, b) => sortByDate(b, a));
   else list.sort(sortByDate);
 
@@ -236,7 +266,7 @@ function renderEvents() {
         <div class="card event-card" data-open="${ev.id}">
           <div class="top">
             <div>
-              <span class="pill later" style="margin-bottom:6px">${esc(ev.category)}</span>
+              <div class="pill-row"><span class="pill later">${esc(ev.category)}</span>${reviewPill(ev)}</div>
               <h3>${esc(ev.name)}</h3>
             </div>
             ${statusPill(ev)}
@@ -277,7 +307,7 @@ function renderCalendar() {
     const evs = (byDate[ymd] || []).sort(sortByDate);
     html += `<div class="${cls}" data-date="${ymd}">
       <div class="num">${d.getDate()}</div>
-      ${evs.map((e) => `<div class="cal-event ${daysUntil(e.date) < 0 ? "past" : ""}" data-open="${e.id}" title="${esc(e.name)}">${e.time ? formatTime(e.time) + " " : ""}${esc(e.name)}</div>`).join("")}
+      ${evs.map((e) => `<div class="cal-event ${daysUntil(e.date) < 0 ? "past" : ""} ${e.status !== "approved" ? e.status : ""}" data-open="${e.id}" title="${esc(e.name)}">${e.time ? formatTime(e.time) + " " : ""}${esc(e.name)}</div>`).join("")}
     </div>`;
   }
   $("#calGrid").innerHTML = html;
@@ -414,6 +444,7 @@ function openForm(ev = null) {
   $("#needsRows").innerHTML = "";
   $("#modalTitle").textContent = ev ? "Edit Event" : "New Event";
   $("#deleteBtn").classList.toggle("hidden", !ev);
+  $("#reviewResetHint").classList.toggle("hidden", !ev || isAdmin() || ev.status === "pending");
   $("#eventId").value = ev?.id || "";
   $("#fName").value = ev?.name || "";
   $("#fDate").value = ev?.date || toYMD(today());
@@ -476,7 +507,9 @@ $("#eventForm").addEventListener("submit", async (e) => {
     replaceEvent(event);
     hideModals();
     renderAll();
-    toast(id ? "Event updated" : "Event added");
+    toast(isAdmin() ? (id ? "Event updated" : "Event added")
+      : event.status === "pending" ? (id ? "Event updated and sent for approval" : "Event submitted for approval")
+      : "Event updated");
   } catch (err) {
     toast(err.message);
   } finally {
@@ -508,7 +541,8 @@ function openDetail(id) {
   const p = needsProgress(ev);
   $("#detailTitle").textContent = ev.name;
   $("#detailBody").innerHTML = `
-    <div style="margin-bottom:14px">${statusPill(ev)} <span class="pill later">${esc(ev.category)}</span></div>
+    <div class="pill-row" style="margin-bottom:14px">${statusPill(ev)} <span class="pill later">${esc(ev.category)}</span> ${reviewPill(ev)}</div>
+    ${reviewBox(ev)}
     <div class="detail-grid">
       <div><span>Date</span>${formatDate(ev.date)}</div>
       <div><span>Time</span>${ev.time ? formatTime(ev.time) : "—"}</div>
@@ -529,8 +563,52 @@ function openDetail(id) {
             <span class="qty">× ${n.qty}</span>
           </li>`).join("")}</ul>`
       : `<p class="muted">No needs listed.</p>`}`;
+  // Admin review controls
+  const panel = $("#reviewPanel");
+  panel.classList.toggle("hidden", !isAdmin());
+  if (isAdmin()) {
+    $("#reviewNote").value = ev.reviewNote || "";
+    $("#approveBtn").textContent = ev.status === "approved" ? "Approved ✓" : "Approve";
+    $("#declineBtn").textContent = ev.status === "declined" ? "Declined ✓" : "Decline";
+  }
   showModal("#detailModal");
 }
+
+function reviewBox(ev) {
+  const by = ev.reviewedBy ? ` by ${esc(ev.reviewedBy)}` : "";
+  const when = ev.reviewedAt ? ` on ${new Date(ev.reviewedAt).toLocaleDateString()}` : "";
+  const text = ev.status === "pending"
+    ? (isAdmin() ? "This event is waiting for your approval." : "Waiting for an admin to approve this event.")
+    : `${STATUS_LABEL[ev.status]}${by}${when}.`;
+  return `<div class="review-box ${ev.status}">
+    <strong>${text}</strong>
+    ${ev.reviewNote ? `<div class="review-note">${esc(ev.reviewNote)}</div>` : ""}
+  </div>`;
+}
+
+async function submitReview(decision) {
+  const note = $("#reviewNote").value.trim();
+  if (decision === "declined" && !note) {
+    toast("Please add a note explaining why it's declined");
+    $("#reviewNote").focus();
+    return;
+  }
+  const buttons = [$("#approveBtn"), $("#declineBtn")];
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    const { event } = await api("POST", `/api/events/${detailId}/review`, { decision, note });
+    replaceEvent(event);
+    openDetail(event.id);
+    renderAll();
+    toast(decision === "approved" ? "Event approved" : "Event declined");
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+$("#approveBtn").addEventListener("click", () => submitReview("approved"));
+$("#declineBtn").addEventListener("click", () => submitReview("declined"));
 
 $("#detailBody").addEventListener("change", async (e) => {
   const i = e.target.dataset.need;
