@@ -214,6 +214,22 @@ function statusPill(ev) {
   return `<span class="pill ${s}">${label}</span>`;
 }
 
+function eventRow(ev) {
+  const p = needsProgress(ev);
+  return `
+    <div class="event-row" data-open="${ev.id}">
+      ${dateBox(ev.date)}
+      <div class="info">
+        <div class="name">${esc(ev.name)}</div>
+        <div class="muted small">${ev.time ? formatTime(ev.time) + " · " : ""}${esc(ev.venue || "No venue set")} · ${p.ready}/${p.total} needs ready</div>
+      </div>
+      <div class="row-pills">
+        ${ev.status !== "approved" ? reviewPill(ev) : ""}
+        ${statusPill(ev)}
+      </div>
+    </div>`;
+}
+
 function renderDashboard() {
   const up = upcoming();
   const thisWeek = up.filter((e) => daysUntil(e.date) <= 7).length;
@@ -228,19 +244,7 @@ function renderDashboard() {
   ].map(([label, num]) => `<div class="stat"><div class="num">${num}</div><div class="label">${label}</div></div>`).join("");
 
   $("#dashUpcoming").innerHTML = up.length
-    ? up.slice(0, 6).map((ev) => {
-        const p = needsProgress(ev);
-        return `
-        <div class="event-row" data-open="${ev.id}">
-          ${dateBox(ev.date)}
-          <div class="info">
-            <div class="name">${esc(ev.name)}</div>
-            <div class="muted small">${ev.time ? formatTime(ev.time) + " · " : ""}${esc(ev.venue || "No venue set")} · ${p.ready}/${p.total} needs ready</div>
-          </div>
-          ${ev.status === "pending" ? reviewPill(ev) : ""}
-          ${statusPill(ev)}
-        </div>`;
-      }).join("")
+    ? up.slice(0, 6).map(eventRow).join("")
     : `<div class="empty-state">No upcoming events yet. Click <strong>+ New Event</strong> to add one.</div>`;
 }
 
@@ -289,6 +293,7 @@ function renderEvents() {
 
 let calMonth = today();
 calMonth.setDate(1);
+let calSelected = toYMD(today());
 
 function renderCalendar() {
   const y = calMonth.getFullYear(), m = calMonth.getMonth();
@@ -299,19 +304,45 @@ function renderCalendar() {
   const byDate = {};
   events.forEach((e) => (byDate[e.date] ||= []).push(e));
 
-  let html = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((d) => `<div class="cal-dow">${d}</div>`).join("");
+  let html = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((d) => `<div class="cal-dow"><span>${d[0]}</span><span class="long-label">${d.slice(1)}</span></div>`).join("");
   for (let i = 0; i < 42; i++) {
     const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
     const ymd = toYMD(d);
-    const cls = ["cal-cell", d.getMonth() !== m ? "other" : "", ymd === todayStr ? "today" : ""].join(" ");
     const evs = (byDate[ymd] || []).sort(sortByDate);
+    const cls = ["cal-cell", d.getMonth() !== m ? "other" : "", ymd === todayStr ? "today" : "",
+      ymd === calSelected ? "selected" : "", evs.length ? "has-events" : ""].join(" ");
     html += `<div class="${cls}" data-date="${ymd}">
       <div class="num">${d.getDate()}</div>
       ${evs.map((e) => `<div class="cal-event ${daysUntil(e.date) < 0 ? "past" : ""} ${e.status !== "approved" ? e.status : ""}" data-open="${e.id}" title="${esc(e.name)}">${e.time ? formatTime(e.time) + " " : ""}${esc(e.name)}</div>`).join("")}
     </div>`;
   }
   $("#calGrid").innerHTML = html;
+  renderCalendarDay(byDate);
 }
+
+/** List of the selected day's events under the calendar (the main way to browse on phones). */
+function renderCalendarDay(byDate) {
+  const evs = (byDate[calSelected] || []).sort(sortByDate);
+  $("#calDay").innerHTML = `
+    <div class="cal-day-head">
+      <h3>${formatDate(calSelected)}</h3>
+      <button class="btn" data-add-on="${calSelected}">+ Add event</button>
+    </div>
+    ${evs.length ? evs.map(eventRow).join("") : `<p class="muted small">No events on this day.</p>`}`;
+}
+
+$("#calGrid").addEventListener("click", (e) => {
+  const cell = e.target.closest(".cal-cell");
+  if (!cell || e.target.closest("[data-open]")) return;
+  calSelected = cell.dataset.date;
+  renderCalendar();
+});
+$("#calDay").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-add-on]");
+  if (!btn) return;
+  openForm();
+  $("#fDate").value = btn.dataset.addOn;
+});
 
 function renderNeedsSummary() {
   const up = upcoming();
@@ -327,16 +358,16 @@ function renderNeedsSummary() {
   const rows = Object.values(totals).sort((a, b) => b.qty - a.qty);
 
   $("#needsSummary").innerHTML = rows.length
-    ? `<table>
+    ? `<table class="stack-table">
         <thead><tr><th>Item</th><th class="num">Total needed</th><th class="num">Ready</th><th class="num">Still needed</th><th>Used in</th></tr></thead>
         <tbody>${rows.map((r) => {
           const left = r.qty - r.ready;
           return `<tr>
-            <td><strong>${esc(r.name)}</strong></td>
-            <td class="num">${r.qty}</td>
-            <td class="num">${r.ready}</td>
-            <td class="num">${left > 0 ? `<span class="pill soon">${left}</span>` : `<span class="pill ok">0</span>`}</td>
-            <td class="muted small">${esc([...new Set(r.events)].join(", "))}</td>
+            <td class="cell-title"><strong>${esc(r.name)}</strong></td>
+            <td class="num" data-label="Total needed">${r.qty}</td>
+            <td class="num" data-label="Ready">${r.ready}</td>
+            <td class="num" data-label="Still needed">${left > 0 ? `<span class="pill soon">${left}</span>` : `<span class="pill ok">0</span>`}</td>
+            <td class="muted small" data-label="Used in">${esc([...new Set(r.events)].join(", "))}</td>
           </tr>`;
         }).join("")}</tbody>
       </table>`
@@ -366,22 +397,22 @@ async function loadUsers() {
 }
 
 function renderUsers() {
-  $("#usersTable").innerHTML = `<div class="table-wrap"><table>
+  $("#usersTable").innerHTML = `<div class="table-wrap"><table class="stack-table">
     <thead><tr><th>Name</th><th>Email</th><th>Role</th><th class="num">Events</th><th>Joined</th><th></th></tr></thead>
     <tbody>${users.map((u) => {
       const self = u.id === currentUser.id;
       return `<tr>
-        <td><strong>${esc(u.name)}</strong>${self ? ` <span class="muted small">(you)</span>` : ""}</td>
-        <td>${esc(u.email)}</td>
-        <td>${self
+        <td class="cell-title"><strong>${esc(u.name)}</strong>${self ? ` <span class="muted small">(you)</span>` : ""}</td>
+        <td data-label="Email">${esc(u.email)}</td>
+        <td data-label="Role">${self
           ? `<span class="pill admin">admin</span>`
           : `<select class="role-select" data-user="${u.id}">
                <option value="client" ${u.role === "client" ? "selected" : ""}>Client</option>
                <option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin</option>
              </select>`}</td>
-        <td class="num">${u.eventCount}</td>
-        <td class="muted small">${esc(String(u.createdAt).slice(0, 10))}</td>
-        <td>${self ? "" : `<button class="btn danger" data-delete-user="${u.id}">Remove</button>`}</td>
+        <td class="num" data-label="Events">${u.eventCount}</td>
+        <td class="muted small" data-label="Joined">${esc(String(u.createdAt).slice(0, 10))}</td>
+        <td class="cell-actions">${self ? "" : `<button class="btn danger" data-delete-user="${u.id}">Remove</button>`}</td>
       </tr>`;
     }).join("")}</tbody>
   </table></div>`;
@@ -661,13 +692,24 @@ $("#tabs").addEventListener("click", (e) => {
   $$(".tab").forEach((t) => t.classList.toggle("active", t === tab));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${tab.dataset.view}`));
   if (tab.dataset.view === "users") loadUsers();
+  window.scrollTo({ top: 0 });
 });
 
 $("#newEventBtn").addEventListener("click", () => openForm());
 $("#searchInput").addEventListener("input", renderEvents);
 $("#filterSelect").addEventListener("change", renderEvents);
-$("#prevMonth").addEventListener("click", () => { calMonth.setMonth(calMonth.getMonth() - 1); renderCalendar(); });
-$("#nextMonth").addEventListener("click", () => { calMonth.setMonth(calMonth.getMonth() + 1); renderCalendar(); });
+function shiftMonth(delta) {
+  calMonth.setMonth(calMonth.getMonth() + delta);
+  // Keep the selected day inside the visible month
+  const sel = parseYMD(calSelected);
+  if (sel.getMonth() !== calMonth.getMonth() || sel.getFullYear() !== calMonth.getFullYear()) {
+    const t = today();
+    calSelected = toYMD(t.getMonth() === calMonth.getMonth() && t.getFullYear() === calMonth.getFullYear() ? t : calMonth);
+  }
+  renderCalendar();
+}
+$("#prevMonth").addEventListener("click", () => shiftMonth(-1));
+$("#nextMonth").addEventListener("click", () => shiftMonth(1));
 
 $("#bellBtn").addEventListener("click", (e) => {
   e.stopPropagation();

@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#4f46e5" />
   <title>Eventious — Event Management</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -13,11 +14,11 @@
       <span>Eventious</span>
     </div>
     <nav class="tabs" id="tabs">
-      <button class="tab active" data-view="dashboard">Dashboard</button>
-      <button class="tab" data-view="events">Events</button>
-      <button class="tab" data-view="calendar">Calendar</button>
-      <button class="tab" data-view="needs">Needs Summary</button>
-      <button class="tab hidden" data-view="users" id="usersTab">Users</button>
+      <button class="tab active" data-view="dashboard"><svg class="tab-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>Dashboard</span></button>
+      <button class="tab" data-view="events"><svg class="tab-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/></svg><span>Events</span></button>
+      <button class="tab" data-view="calendar"><svg class="tab-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg><span>Calendar</span></button>
+      <button class="tab" data-view="needs"><svg class="tab-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg><span>Needs<span class="long-label"> Summary</span></span></button>
+      <button class="tab hidden" data-view="users" id="usersTab"><svg class="tab-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg><span>Users</span></button>
     </nav>
     <div class="top-actions">
       <div class="bell-wrap">
@@ -33,12 +34,15 @@
           <ul id="notifList" class="notif-list"></ul>
         </div>
       </div>
-      <button class="btn primary" id="newEventBtn">+ New Event</button>
+      <button class="btn primary" id="newEventBtn" aria-label="New event"><span class="plus">+</span><span class="btn-label"> New Event</span></button>
       <div class="user-chip">
         <span class="avatar" id="userAvatar">?</span>
         <span class="uname" id="userName"></span>
         <span class="pill later" id="userRole"></span>
-        <button class="btn" id="logoutBtn">Log out</button>
+        <button class="btn logout-btn" id="logoutBtn" aria-label="Log out">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+          <span class="btn-label">Log out</span>
+        </button>
       </div>
     </div>
   </header>
@@ -83,6 +87,8 @@
           <button class="icon-btn" id="nextMonth" aria-label="Next month">›</button>
         </div>
         <div class="cal-grid" id="calGrid"></div>
+        <p class="muted small cal-hint">Tap a day to see its events.</p>
+        <div class="cal-day" id="calDay"></div>
       </div>
     </section>
 
@@ -122,10 +128,10 @@
           <label class="full">Event name *
             <input type="text" id="fName" required placeholder="e.g. Santos Wedding Reception" />
           </label>
-          <label>Date *
+          <label class="pair">Date *
             <input type="date" id="fDate" required />
           </label>
-          <label>Time
+          <label class="pair">Time
             <input type="time" id="fTime" />
           </label>
           <label>Venue
@@ -134,7 +140,7 @@
           <label>Client / Organizer
             <input type="text" id="fClient" placeholder="Name or contact" />
           </label>
-          <label>Category
+          <label class="pair">Category
             <select id="fCategory">
               <option>Wedding</option>
               <option>Birthday</option>
@@ -144,7 +150,7 @@
               <option>Other</option>
             </select>
           </label>
-          <label>Remind me
+          <label class="pair">Remind me
             <select id="fRemind">
               <option value="1">1 day before</option>
               <option value="3" selected>3 days before</option>
