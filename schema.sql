@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
   name          VARCHAR(100)  NOT NULL,
   email         VARCHAR(190)  NOT NULL UNIQUE,
   password_hash VARCHAR(255)  NOT NULL,
+  role          ENUM('admin','client') NOT NULL DEFAULT 'client',
   created_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

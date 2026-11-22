@@ -40,6 +40,8 @@ async function api(method, url, body) {
 }
 
 let events = [];
+let currentUser = null;
+const isAdmin = () => currentUser?.role === "admin";
 
 function replaceEvent(ev) {
   const i = events.findIndex((x) => x.id === ev.id);
@@ -243,6 +245,7 @@ function renderEvents() {
             <span>📅 ${formatDate(ev.date)}${ev.time ? " · " + formatTime(ev.time) : ""}</span>
             ${ev.venue ? `<span>📍 ${esc(ev.venue)}</span>` : ""}
             ${ev.client ? `<span>👤 ${esc(ev.client)}</span>` : ""}
+            ${isAdmin() && ev.createdBy ? `<span>✍️ Booked by ${esc(ev.createdBy)}</span>` : ""}
           </div>
           ${ev.needs.length ? `<div class="needs-mini">${ev.needs.map((n) => `<span>${esc(n.name)} × ${n.qty}</span>`).join("")}</div>` : ""}
           <div>
@@ -317,6 +320,76 @@ function renderAll() {
   renderNeedsSummary();
   renderNotifications();
 }
+
+/* ---------- Users (admin only) ---------- */
+let users = [];
+
+async function loadUsers() {
+  if (!isAdmin()) return;
+  $("#usersTable").innerHTML = `<div class="loading">Loading users…</div>`;
+  try {
+    users = (await api("GET", "/api/users")).users;
+    renderUsers();
+  } catch (err) {
+    $("#usersTable").innerHTML = `<div class="empty-state">${esc(err.message)}</div>`;
+  }
+}
+
+function renderUsers() {
+  $("#usersTable").innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th>Name</th><th>Email</th><th>Role</th><th class="num">Events</th><th>Joined</th><th></th></tr></thead>
+    <tbody>${users.map((u) => {
+      const self = u.id === currentUser.id;
+      return `<tr>
+        <td><strong>${esc(u.name)}</strong>${self ? ` <span class="muted small">(you)</span>` : ""}</td>
+        <td>${esc(u.email)}</td>
+        <td>${self
+          ? `<span class="pill admin">admin</span>`
+          : `<select class="role-select" data-user="${u.id}">
+               <option value="client" ${u.role === "client" ? "selected" : ""}>Client</option>
+               <option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin</option>
+             </select>`}</td>
+        <td class="num">${u.eventCount}</td>
+        <td class="muted small">${esc(String(u.createdAt).slice(0, 10))}</td>
+        <td>${self ? "" : `<button class="btn danger" data-delete-user="${u.id}">Remove</button>`}</td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table></div>`;
+}
+
+$("#usersTable").addEventListener("change", async (e) => {
+  const sel = e.target.closest(".role-select");
+  if (!sel) return;
+  const u = users.find((x) => String(x.id) === sel.dataset.user);
+  sel.disabled = true;
+  try {
+    await api("PATCH", `/api/users/${u.id}`, { role: sel.value });
+    u.role = sel.value;
+    toast(`${u.name} is now ${sel.value === "admin" ? "an admin" : "a client"}`);
+  } catch (err) {
+    sel.value = u.role;
+    toast(err.message);
+  } finally {
+    sel.disabled = false;
+  }
+});
+
+$("#usersTable").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-delete-user]");
+  if (!btn) return;
+  const u = users.find((x) => String(x.id) === btn.dataset.deleteUser);
+  if (!confirm(`Remove ${u.name}? Their ${u.eventCount} event(s) will be deleted too. This cannot be undone.`)) return;
+  try {
+    await api("DELETE", `/api/users/${u.id}`);
+    users = users.filter((x) => x !== u);
+    events = (await api("GET", "/api/events")).events;
+    renderUsers();
+    renderAll();
+    toast("User removed");
+  } catch (err) {
+    toast(err.message);
+  }
+});
 
 /* ---------- Event form ---------- */
 function addNeedRow(item = { name: "", qty: 1, ready: false }) {
@@ -443,7 +516,7 @@ function openDetail(id) {
       <div><span>Client / Organizer</span>${esc(ev.client) || "—"}</div>
       <div><span>Reminder</span>${ev.remindDays} day${ev.remindDays > 1 ? "s" : ""} before</div>
       <div><span>Needs ready</span>${p.ready} of ${p.total}</div>
-      <div><span>Created by</span>${esc(ev.createdBy) || "—"}</div>
+      ${isAdmin() ? `<div><span>Created by</span>${esc(ev.createdBy) || "—"}</div>` : ""}
     </div>
     ${ev.notes ? `<p style="white-space:pre-wrap;background:var(--bg);padding:10px 12px;border-radius:8px">${esc(ev.notes)}</p>` : ""}
     <h3 style="margin:16px 0 6px">Needs checklist</h3>
@@ -509,6 +582,7 @@ $("#tabs").addEventListener("click", (e) => {
   if (!tab) return;
   $$(".tab").forEach((t) => t.classList.toggle("active", t === tab));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${tab.dataset.view}`));
+  if (tab.dataset.view === "users") loadUsers();
 });
 
 $("#newEventBtn").addEventListener("click", () => openForm());
@@ -553,7 +627,15 @@ async function start() {
   $("#dashUpcoming").innerHTML = `<div class="loading">Loading events…</div>`;
   try {
     const [{ user }, data] = await Promise.all([api("GET", "/api/me"), api("GET", "/api/events")]);
+    currentUser = user;
     $("#userName").textContent = user.name;
+    $("#userRole").textContent = user.role === "admin" ? "Admin" : "Client";
+    $("#userRole").className = `pill ${user.role}`;
+    $("#usersTab").classList.toggle("hidden", !isAdmin());
+    if (!isAdmin()) {
+      $("#needsTitle").textContent = "Total Needs: My Upcoming Events";
+      $("#searchInput").placeholder = "Search my events, venues…";
+    }
     $("#userAvatar").textContent = user.name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
     events = data.events;
     renderAll();
@@ -561,7 +643,7 @@ async function start() {
     $("#dashUpcoming").innerHTML = `<div class="empty-state">${esc(err.message)}</div>`;
     return;
   }
-  // Events are shared, so pull other users' changes every minute (also refreshes reminders after midnight)
+  // Pull other users' changes every minute (also refreshes reminders after midnight)
   setInterval(async () => {
     if (!$("#eventModal").classList.contains("hidden")) return; // don't disturb someone mid-edit
     try {

@@ -12,14 +12,50 @@ const db = require("./db");
 const PORT = Number(process.env.PORT || 3000);
 const CATEGORIES = ["Wedding", "Birthday", "Corporate", "School", "Community", "Other"];
 
+const ON_VERCEL = !!process.env.VERCEL;
+
 let SESSION_SECRET = process.env.SESSION_SECRET;
 if (!SESSION_SECRET) {
   SESSION_SECRET = crypto.randomBytes(32).toString("hex");
-  console.warn("⚠  SESSION_SECRET not set in .env; using a temporary one (everyone gets logged out on restart).");
+  console.warn("⚠  SESSION_SECRET not set; using a temporary one (everyone gets logged out on restart)." +
+    (ON_VERCEL ? " Set SESSION_SECRET in Vercel → Settings → Environment Variables." : ""));
 }
 
 const app = express();
 app.disable("x-powered-by");
+app.set("trust proxy", 1); // Vercel/most hosts sit behind a proxy (needed for secure cookies + rate limiting)
+
+// Make sure the tables exist before handling any request (runs once per server/function instance).
+app.use(async (req, res, next) => {
+  try {
+    await db.init();
+    next();
+  } catch (err) {
+    console.error("✖ Could not connect to MySQL:", err.message);
+    const msg = "The server can't reach its database. Check the DB_* settings.";
+    if (req.path.startsWith("/api/")) return res.status(503).json({ error: msg });
+    res.status(503).type("text").send(msg);
+  }
+});
+
+app.use(session({
+  name: "eventious.sid",
+  secret: SESSION_SECRET,
+  store: new MySQLStore({
+    createDatabaseTable: true,
+    clearExpired: !ON_VERCEL, // no background timers in serverless; expired sessions are still rejected
+  }, db.getPool()),
+  resave: false,
+  saveUninitialized: false,
+  proxy: true,
+  cookie: {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: ON_VERCEL || process.env.NODE_ENV === "production",
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+  },
+}));
+
 app.use(express.json({ limit: "100kb" }));
 
 /* ---------- Helpers ---------- */
@@ -27,10 +63,33 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-function requireAuth(req, res, next) {
+/** Loads the logged-in user (fresh from the DB, so role changes apply immediately) into req.user. */
+async function requireAuth(req, res, next) {
   if (!req.session.userId) return res.status(401).json({ error: "Please log in." });
+  const [[user]] = await db.getPool().query(
+    "SELECT id, name, email, role FROM users WHERE id = ?", [req.session.userId]
+  );
+  if (!user) {
+    req.session.destroy(() => {});
+    return res.status(401).json({ error: "Please log in." });
+  }
+  req.user = user;
   next();
 }
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== "admin") return res.status(403).json({ error: "Admins only." });
+  next();
+}
+
+const isAdmin = (user) => user.role === "admin";
+
+/** SQL condition limiting events to the ones this user may access (alias e). */
+function eventScope(user) {
+  return isAdmin(user) ? { sql: "1 = 1", params: [] } : { sql: "e.user_id = ?", params: [user.id] };
+}
+
+const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role });
 
 const str = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
@@ -80,13 +139,14 @@ function toClient(row, needs) {
   };
 }
 
-/** Events are shared: every logged-in user sees all of them. */
-async function loadEvents(eventId = null) {
+/** Admins see every event; clients see only their own. */
+async function loadEvents(user, eventId = null) {
   const pool = db.getPool();
-  const base = "SELECT e.*, u.name AS creator_name FROM events e LEFT JOIN users u ON u.id = e.user_id";
+  const scope = eventScope(user);
+  const base = `SELECT e.*, u.name AS creator_name FROM events e LEFT JOIN users u ON u.id = e.user_id WHERE ${scope.sql}`;
   const [rows] = eventId
-    ? await pool.query(`${base} WHERE e.id = ?`, [eventId])
-    : await pool.query(`${base} ORDER BY e.event_date, e.event_time`);
+    ? await pool.query(`${base} AND e.id = ?`, [...scope.params, eventId])
+    : await pool.query(`${base} ORDER BY e.event_date, e.event_time`, scope.params);
   if (!rows.length) return [];
   const [needs] = await pool.query(
     "SELECT * FROM event_needs WHERE event_id IN (?) ORDER BY position, id",
@@ -141,163 +201,175 @@ const authLimiter = rateLimit({
   message: { error: "Too many attempts. Please try again in a few minutes." },
 });
 
-function mountRoutes() {
-  app.post("/api/register", authLimiter, async (req, res) => {
-    const name = str(req.body.name, 100);
-    const email = str(req.body.email, 190).toLowerCase();
-    const password = typeof req.body.password === "string" ? req.body.password : "";
+app.post("/api/register", authLimiter, async (req, res) => {
+  const name = str(req.body.name, 100);
+  const email = str(req.body.email, 190).toLowerCase();
+  const password = typeof req.body.password === "string" ? req.body.password : "";
 
-    if (!name) throw new HttpError(400, "Name is required.");
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "Please enter a valid email.");
-    if (password.length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
-    if (password.length > 72) throw new HttpError(400, "Password must be 72 characters or fewer.");
+  if (!name) throw new HttpError(400, "Name is required.");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "Please enter a valid email.");
+  if (password.length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
+  if (password.length > 72) throw new HttpError(400, "Password must be 72 characters or fewer.");
 
-    const hash = await bcrypt.hash(password, 12);
-    try {
-      const [result] = await db.getPool().query(
-        "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)", [name, email, hash]
-      );
-      await startSession(req, { id: result.insertId, name });
-      res.status(201).json({ user: { id: result.insertId, name, email } });
-    } catch (err) {
-      if (err.code === "ER_DUP_ENTRY") throw new HttpError(409, "An account with that email already exists.");
-      throw err;
-    }
-  });
-
-  app.post("/api/login", authLimiter, async (req, res) => {
-    const email = str(req.body.email, 190).toLowerCase();
-    const password = typeof req.body.password === "string" ? req.body.password : "";
-    const [[user]] = await db.getPool().query("SELECT * FROM users WHERE email = ?", [email]);
-
-    const ok = user && (await bcrypt.compare(password, user.password_hash));
-    if (!ok) throw new HttpError(401, "Incorrect email or password.");
-
+  const hash = await bcrypt.hash(password, 12);
+  try {
+    // The very first account becomes the admin; everyone else signs up as a client.
+    const [[{ n }]] = await db.getPool().query("SELECT COUNT(*) AS n FROM users");
+    const role = n ? "client" : "admin";
+    const [result] = await db.getPool().query(
+      "INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)", [name, email, hash, role]
+    );
+    const user = { id: result.insertId, name, email, role };
     await startSession(req, user);
-    res.json({ user: { id: user.id, name: user.name, email: user.email } });
-  });
+    res.status(201).json({ user: publicUser(user) });
+  } catch (err) {
+    if (err.code === "ER_DUP_ENTRY") throw new HttpError(409, "An account with that email already exists.");
+    throw err;
+  }
+});
 
-  app.post("/api/logout", (req, res) => {
-    req.session.destroy(() => {
-      res.clearCookie("eventious.sid");
-      res.json({ ok: true });
-    });
-  });
+app.post("/api/login", authLimiter, async (req, res) => {
+  const email = str(req.body.email, 190).toLowerCase();
+  const password = typeof req.body.password === "string" ? req.body.password : "";
+  const [[user]] = await db.getPool().query("SELECT * FROM users WHERE email = ?", [email]);
 
-  app.get("/api/me", requireAuth, async (req, res) => {
-    const [[user]] = await db.getPool().query("SELECT id, name, email FROM users WHERE id = ?", [req.session.userId]);
-    if (!user) throw new HttpError(401, "Please log in.");
-    res.json({ user });
-  });
+  const ok = user && (await bcrypt.compare(password, user.password_hash));
+  if (!ok) throw new HttpError(401, "Incorrect email or password.");
 
-  /* ---------- Event routes ---------- */
-  app.get("/api/events", requireAuth, async (req, res) => {
-    res.json({ events: await loadEvents() });
-  });
+  await startSession(req, user);
+  res.json({ user: publicUser(user) });
+});
 
-  app.post("/api/events", requireAuth, async (req, res) => {
-    const ev = parseEvent(req.body);
-    const id = await inTransaction(async (conn) => {
-      const [result] = await conn.query(
-        `INSERT INTO events (user_id, name, event_date, event_time, venue, client, category, remind_days, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [req.session.userId, ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes]
-      );
-      await saveNeeds(conn, result.insertId, ev.needs);
-      return result.insertId;
-    });
-    const [saved] = await loadEvents(id);
-    res.status(201).json({ event: saved });
-  });
-
-  app.put("/api/events/:id", requireAuth, async (req, res) => {
-    const ev = parseEvent(req.body);
-    const id = Number(req.params.id);
-    await inTransaction(async (conn) => {
-      const [result] = await conn.query(
-        `UPDATE events SET name = ?, event_date = ?, event_time = ?, venue = ?, client = ?, category = ?,
-                remind_days = ?, notes = ? WHERE id = ?`,
-        [ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes, id]
-      );
-      if (!result.affectedRows) throw new HttpError(404, "Event not found.");
-      await saveNeeds(conn, id, ev.needs);
-    });
-    const [saved] = await loadEvents(id);
-    res.json({ event: saved });
-  });
-
-  app.patch("/api/events/:id/needs/:needId", requireAuth, async (req, res) => {
-    const [result] = await db.getPool().query(
-      `UPDATE event_needs n JOIN events e ON e.id = n.event_id
-       SET n.ready = ? WHERE n.id = ? AND e.id = ?`,
-      [req.body.ready ? 1 : 0, Number(req.params.needId), Number(req.params.id)]
-    );
-    if (!result.affectedRows) throw new HttpError(404, "Item not found.");
-    const [saved] = await loadEvents(Number(req.params.id));
-    res.json({ event: saved });
-  });
-
-  app.delete("/api/events/:id", requireAuth, async (req, res) => {
-    const [result] = await db.getPool().query(
-      "DELETE FROM events WHERE id = ?", [Number(req.params.id)]
-    );
-    if (!result.affectedRows) throw new HttpError(404, "Event not found.");
+app.post("/api/logout", (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie("eventious.sid");
     res.json({ ok: true });
   });
+});
 
-  app.use("/api", (req, res) => res.status(404).json({ error: "Not found." }));
+app.get("/api/me", requireAuth, (req, res) => {
+  res.json({ user: publicUser(req.user) });
+});
 
-  /* ---------- Pages ---------- */
-  app.get(["/", "/index.html"], (req, res) => {
-    if (!req.session.userId) return res.redirect("/login.html");
-    res.sendFile(path.join(__dirname, "public", "index.html"));
-  });
-  app.get("/login.html", (req, res, next) => {
-    if (req.session.userId) return res.redirect("/");
-    next();
-  });
-  app.use(express.static(path.join(__dirname, "public"), { index: false }));
+/* ---------- Admin: user management ---------- */
+app.get("/api/users", requireAuth, requireAdmin, async (req, res) => {
+  const [users] = await db.getPool().query(
+    `SELECT u.id, u.name, u.email, u.role, u.created_at, COUNT(e.id) AS event_count
+     FROM users u LEFT JOIN events e ON e.user_id = u.id
+     GROUP BY u.id, u.name, u.email, u.role, u.created_at ORDER BY u.role, u.name`
+  );
+  res.json({ users: users.map((u) => ({ ...publicUser(u), createdAt: u.created_at, eventCount: Number(u.event_count) })) });
+});
 
-  /* ---------- Errors ---------- */
-  app.use((err, req, res, next) => {
-    if (err.status && err.status < 500) return res.status(err.status).json({ error: err.message });
-    console.error(err);
-    res.status(500).json({ error: "Something went wrong on the server." });
+app.patch("/api/users/:id", requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const role = req.body.role;
+  if (!["admin", "client"].includes(role)) throw new HttpError(400, "Role must be admin or client.");
+  if (id === req.user.id && role !== "admin") throw new HttpError(400, "You can't remove your own admin role.");
+  const [result] = await db.getPool().query("UPDATE users SET role = ? WHERE id = ?", [role, id]);
+  if (!result.affectedRows) throw new HttpError(404, "User not found.");
+  res.json({ ok: true });
+});
+
+app.delete("/api/users/:id", requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (id === req.user.id) throw new HttpError(400, "You can't delete your own account.");
+  const [result] = await db.getPool().query("DELETE FROM users WHERE id = ?", [id]);
+  if (!result.affectedRows) throw new HttpError(404, "User not found.");
+  res.json({ ok: true });
+});
+
+/* ---------- Event routes ---------- */
+app.get("/api/events", requireAuth, async (req, res) => {
+  res.json({ events: await loadEvents(req.user) });
+});
+
+app.post("/api/events", requireAuth, async (req, res) => {
+  const ev = parseEvent(req.body);
+  const id = await inTransaction(async (conn) => {
+    const [result] = await conn.query(
+      `INSERT INTO events (user_id, name, event_date, event_time, venue, client, category, remind_days, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [req.user.id, ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes]
+    );
+    await saveNeeds(conn, result.insertId, ev.needs);
+    return result.insertId;
   });
-}
+  const [saved] = await loadEvents(req.user, id);
+  res.status(201).json({ event: saved });
+});
+
+app.put("/api/events/:id", requireAuth, async (req, res) => {
+  const ev = parseEvent(req.body);
+  const id = Number(req.params.id);
+  const scope = eventScope(req.user);
+  await inTransaction(async (conn) => {
+    const [[found]] = await conn.query(
+      `SELECT e.id FROM events e WHERE e.id = ? AND ${scope.sql} FOR UPDATE`, [id, ...scope.params]
+    );
+    if (!found) throw new HttpError(404, "Event not found.");
+    await conn.query(
+      `UPDATE events SET name = ?, event_date = ?, event_time = ?, venue = ?, client = ?, category = ?,
+              remind_days = ?, notes = ? WHERE id = ?`,
+      [ev.name, ev.date, ev.time, ev.venue, ev.client, ev.category, ev.remindDays, ev.notes, id]
+    );
+    await saveNeeds(conn, id, ev.needs);
+  });
+  const [saved] = await loadEvents(req.user, id);
+  res.json({ event: saved });
+});
+
+app.patch("/api/events/:id/needs/:needId", requireAuth, async (req, res) => {
+  const scope = eventScope(req.user);
+  const [result] = await db.getPool().query(
+    `UPDATE event_needs n JOIN events e ON e.id = n.event_id
+     SET n.ready = ? WHERE n.id = ? AND e.id = ? AND ${scope.sql}`,
+    [req.body.ready ? 1 : 0, Number(req.params.needId), Number(req.params.id), ...scope.params]
+  );
+  if (!result.affectedRows) throw new HttpError(404, "Item not found.");
+  const [saved] = await loadEvents(req.user, Number(req.params.id));
+  res.json({ event: saved });
+});
+
+app.delete("/api/events/:id", requireAuth, async (req, res) => {
+  const scope = eventScope(req.user);
+  const [result] = await db.getPool().query(
+    `DELETE e FROM events e WHERE e.id = ? AND ${scope.sql}`, [Number(req.params.id), ...scope.params]
+  );
+  if (!result.affectedRows) throw new HttpError(404, "Event not found.");
+  res.json({ ok: true });
+});
+
+app.use("/api", (req, res) => res.status(404).json({ error: "Not found." }));
+
+/* ---------- Pages ---------- */
+app.get(["/", "/index.html"], (req, res) => {
+  if (!req.session.userId) return res.redirect("/login.html");
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+app.get("/login.html", (req, res, next) => {
+  if (req.session.userId) return res.redirect("/");
+  next();
+});
+app.use(express.static(path.join(__dirname, "public"), { index: false }));
+
+/* ---------- Errors ---------- */
+app.use((err, req, res, next) => {
+  if (err.status && err.status < 500) return res.status(err.status).json({ error: err.message });
+  console.error(err);
+  res.status(500).json({ error: "Something went wrong on the server." });
+});
 
 /* ---------- Start ---------- */
-(async () => {
-  try {
-    await db.init();
-  } catch (err) {
-    console.error("✖ Could not connect to MySQL:", err.message);
-    console.error("  Is MySQL running (XAMPP Control Panel → Start MySQL)? Check DB_* settings in .env.");
-    process.exit(1);
-  }
+// On Vercel the app is imported by api/index.js; locally we start a normal server.
+module.exports = app;
 
-  const store = new MySQLStore({
-    host: db.config.host, port: db.config.port, user: db.config.user,
-    password: db.config.password, database: db.config.database,
-    createDatabaseTable: true,
-    clearExpired: true,
-  });
-
-  app.use(session({
-    name: "eventious.sid",
-    secret: SESSION_SECRET,
-    store,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    },
-  }));
-
-  mountRoutes();
-
-  app.listen(PORT, () => console.log(`✔ Eventious running at http://localhost:${PORT}`));
-})();
+if (require.main === module) {
+  db.init()
+    .then(() => app.listen(PORT, () => console.log(`✔ Eventious running at http://localhost:${PORT}`)))
+    .catch((err) => {
+      console.error("✖ Could not connect to MySQL:", err.message);
+      console.error("  Is MySQL running (XAMPP Control Panel → Start MySQL)? Check DB_* settings in .env.");
+      process.exit(1);
+    });
+}

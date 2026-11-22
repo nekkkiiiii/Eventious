@@ -17,6 +17,7 @@
       <button class="tab" data-view="events">Events</button>
       <button class="tab" data-view="calendar">Calendar</button>
       <button class="tab" data-view="needs">Needs Summary</button>
+      <button class="tab hidden" data-view="users" id="usersTab">Users</button>
     </nav>
     <div class="top-actions">
       <div class="bell-wrap">
@@ -36,6 +37,7 @@
       <div class="user-chip">
         <span class="avatar" id="userAvatar">?</span>
         <span class="uname" id="userName"></span>
+        <span class="pill later" id="userRole"></span>
         <button class="btn" id="logoutBtn">Log out</button>
       </div>
     </div>
@@ -86,10 +88,21 @@
     <section class="view" id="view-needs">
       <div class="card">
         <div class="card-head">
-          <h2>Total Needs: Upcoming Events</h2>
+          <h2 id="needsTitle">Total Needs: Upcoming Events</h2>
           <p class="muted">Everything you need to prepare for upcoming events, added up.</p>
         </div>
         <div id="needsSummary"></div>
+      </div>
+    </section>
+
+    <!-- USERS (admin only) -->
+    <section class="view" id="view-users">
+      <div class="card">
+        <div class="card-head">
+          <h2>Users</h2>
+          <p class="muted">Admins can see and manage every event. Clients only see their own events.</p>
+        </div>
+        <div id="usersTable"></div>
       </div>
     </section>
   </main>

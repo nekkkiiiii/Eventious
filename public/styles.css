@@ -141,6 +141,10 @@ h3 { font-size: 1rem; }
 .pill.later { background: var(--primary-soft); color: var(--primary); }
 .pill.past { background: #f3f4f6; color: var(--muted); }
 .pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.admin { background: var(--danger-soft); color: var(--danger); }
+.pill.client { background: var(--primary-soft); color: var(--primary); }
+.table-wrap { overflow-x: auto; }
+.role-select { padding: 4px 8px; }
 
 /* Events grid */
 .toolbar { display: flex; gap: 10px; margin-bottom: 18px; }
